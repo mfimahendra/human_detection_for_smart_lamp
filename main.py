@@ -4,14 +4,20 @@ import numpy as np
 import json
 import mysql.connector
 import threading
+import requests
+import time
+import json
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+location = "Lobby"
 
 # Database connection parameters
 config = {
-    "user": "root",
-    "password": "",
-    "host": "localhost",
-    "database": "iot",
+    "user": "ympimis",
+    "password": "ympimis",
+    "host": "10.109.52.21",
+    "database": "ympimis_2",
     "raise_on_warnings": True
 }
 
@@ -22,48 +28,49 @@ conn = mysql.connector.connect(**config)
 cursor = conn.cursor()
 
 # Execute a query
-cursor.execute("SELECT * FROM lamp")
+cursor.execute("SELECT * FROM iot_lamps WHERE location = %s", (location,))
 
 # Fetch all rows from the last executed query
 rows = cursor.fetchall()
 
-
-
 # Load the YOLOv5 model
 model = torch.hub.load("ultralytics/yolov5", "yolov5s")
 
-# Initialize the webcam
-vid = cv2.VideoCapture(0)
+def get_session():
+    session = requests.Session()
+    retries = Retry(total=5,  # Jumlah total retry
+                    backoff_factor=0.3,  # Faktor backoff untuk jeda retry
+                    status_forcelist=[500, 502, 503, 504])  # Status HTTP untuk retry
+    session.mount('http://', HTTPAdapter(max_retries=retries))
+    return session
 
-# predefined_boxes = {
-#     0: {
-#         "points": [[100, 100], [400, 100], [500, 300], [100, 300]],
-#         "callback": callback_box1
-#     },
-#     1: {
-#         "points": [(50, 50), (200, 50), (200, 150), (50, 150)],
-#         "callback": callback_box2
-#     },
-#     2: {
-#         "points": [(150, 150), (450, 150), (450, 350), (150, 350)],
-#         "callback": callback_box3
-#     }
-# }
-
-def toggle_lamp(lamp_id):
-    # Do request to rasberrypi API
-    pass
+session = get_session()
 
 predefined_boxes = {}
 
-# parse json data on column 3
-for row in rows:
-    points = json.loads(row[3])  # Parse the JSON string from the third column
-    idx = row[0]
+for row in rows:    
+    ip_camera = row[2]    
+    ip_controller = row[3]
+    points = json.loads(row[5])  # Parse the JSON string from the third column
+    idx = row[0]    
     predefined_boxes[idx] = {
         "points": points,
-        "callback": lambda: toggle_lamp("20h")
+        "callback": lambda: toggle_lamp(idx, 'on')
     }
+
+
+def toggle_lamp(lamp_id, state):    
+    url = f"http://" + ip_controller + f"/lamp/{lamp_id}/{state}"
+    # url = "http://" + ip_controller + f"/lamp/{lamp_id}/{state}"
+    try:
+        response = session.get(url)
+        response.raise_for_status()  # Raise an exception for HTTP errors
+        print(f"Successfully toggled lamp {lamp_id} to {state}")
+    except requests.RequestException as e:
+        print(f"Failed to toggle lamp {lamp_id}: {e}")
+
+# Initialize the webcam
+vid = cv2.VideoCapture(ip_camera)
 
 # Close the cursor and connection
 cursor.close()
@@ -74,70 +81,78 @@ def is_point_inside_polygon(x, y, polygon):
     result = cv2.pointPolygonTest(pts_array, (x, y), False)
     return result >= 0
 
-while True:
-    ret, frame = vid.read()
-    if not ret:
-        break
-    
-    # Perform inference on the frame
-    results = model(frame)
-    
-    # Get the detected objects
-    detections = results.xyxy[0].cpu().numpy()
-    
-    box_has_person = {key: False for key in predefined_boxes}
-    
-    # Draw all predefined boxes
-    for idx, box_info in predefined_boxes.items():
-        pts_array = np.array(box_info["points"], np.int32).reshape((-1, 1, 2))
-        cv2.polylines(frame, [pts_array], isClosed=True, color=(0, 255, 0), thickness=2)
-    
-    # Draw bounding boxes on the frame
-    for detection in detections:
-        x1, y1, x2, y2, confidence, class_id = detection
-        
-        # Filter for person class ID (0)
-        if int(class_id) != 0:
-            continue
+last_request_time = time.time()
+lamp_on = False
 
-        label = f"{results.names[int(class_id)]} {confidence:.2f}"
-        
-        # Calculate the center point of the bounding box
-        center_x = (x1 + x2) / 2
-        center_y = (y1 + y2) / 2
-        
-        # Check if the center point is inside any of the predefined boxes
+last_request_time = time.time()
+lamp_on = False
+
+last_request_time = {idx: time.time() for idx in predefined_boxes.keys()}
+lamp_on = {idx: False for idx in predefined_boxes.keys()}
+
+while True:
+    try:
+        ret, frame = vid.read()
+        if not ret:
+            break
+
+        # Resize, convert color, and perform inference
+        frame = cv2.resize(frame, (512, 384))
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = model(frame)
+        detections = results.xyxy[0].cpu().numpy()
+
+        box_has_person = {key: False for key in predefined_boxes}
+
         for idx, box_info in predefined_boxes.items():
-            if is_point_inside_polygon(center_x, center_y, box_info["points"]):
-                box_has_person[idx] = True
-                color = (255, 0, 0)  # Blue if center is inside any predefined box
-                break
-        else:
-            color = (0, 0, 255)  # Red if center is outside all predefined boxes
-        
-        # Draw rectangle
-        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-        
-        # Draw label
-        cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-        
-        # Draw the center point
-        cv2.circle(frame, (int(center_x), int(center_y)), 5, color, -1)
-    
-    for idx, has_person in box_has_person.items():
-        if has_person:
-            pts_array = np.array(predefined_boxes[idx]["points"], np.int32).reshape((-1, 1, 2))
-            cv2.polylines(frame, [pts_array], isClosed=True, color=(0, 0, 255), thickness=3)
-            # if its stay for 5 seconds, call the callback function
-            predefined_boxes[idx]["callback"]() 
-    
-    # Display the frame with bounding boxes
-    cv2.imshow("Lampu cosdown", frame)
-    
-    # Handle keyboard input to quit
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
-        break
+            pts_array = np.array(box_info["points"], np.int32).reshape((-1, 1, 2))
+            cv2.polylines(frame, [pts_array], isClosed=True, color=(0, 255, 0), thickness=2)
+
+        person_detected_in_any_box = False
+        for detection in detections:
+            x1, y1, x2, y2, confidence, class_id = detection
+            if int(class_id) != 0:
+                continue
+
+            center_x = (x1 + x2) / 2
+            center_y = (y1 + y2) / 2
+
+            for idx, box_info in predefined_boxes.items():
+                if is_point_inside_polygon(center_x, center_y, box_info["points"]):
+                    box_has_person[idx] = True
+                    person_detected_in_any_box = True
+                    color = (255, 0, 0)
+                    break
+            else:
+                color = (0, 0, 255)
+
+            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+            label = f"{results.names[int(class_id)]} {confidence:.2f}"
+            cv2.putText(frame, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            cv2.circle(frame, (int(center_x), int(center_y)), 5, color, -1)
+
+        for idx in predefined_boxes.keys():
+            if box_has_person[idx]:
+                if not lamp_on[idx]:
+                    toggle_lamp(idx, 'on')
+                    lamp_on[idx] = True
+                last_request_time[idx] = time.time()
+            else:
+                if lamp_on[idx] and (time.time() - last_request_time[idx] > 5):
+                    toggle_lamp(idx, 'off')
+                    lamp_on[idx] = False
+
+        cv2.imshow("Lampu", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+
+    except Exception as e:
+        # timeout 5second then try again
+        print("Error: ", e)
+        time.sleep(5)
+        continue
+
 
 # Release the webcam and close all OpenCV windows
 vid.release()
