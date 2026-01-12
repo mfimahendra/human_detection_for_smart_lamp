@@ -14,10 +14,10 @@ location = "Lobby"
 
 # Database connection parameters
 config = {
-    "user": "ympimis",
-    "password": "ympimis",
-    "host": "10.109.52.21",
-    "database": "ympimis_2",
+    "user": "root",
+    "password": "",
+    "host": "localhost",
+    "database": "server_lists",
     "raise_on_warnings": True
 }
 
